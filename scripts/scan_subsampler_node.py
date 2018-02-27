@@ -4,45 +4,64 @@ import sensor_msgs.msg # ROS message namespaces
 import geometry_msgs.msg # ROS message namespaces
 
 import numpy as np
+from math import pi
+
+# Custom libaries
+#from point_cloud_to_ellipse import *
 
 
 class EllipseLaserFilter:
+        # Dimensions
+        dim = 2
+
         # Define x and y limits of space to scan in [m]
-	xLim = [-0.5, 0.5]
-	yLIm = [0, 10]
+	#xLim = [-0.5, 0.5]
+	#yLIm = [0, 10]
 
 	# define human ellipse geometry
-	a_human = np.array([0.4, 1.1]) #[m]
+        # LARGER AXIS ALWAYS FIRST!!!!
+	a_human = [0.4, 1.1] #[m]
+        a_bin = [0.5,0.5] # [m]
 
 	# define robot geometry
-	d_robot = 0.5 # [m]
+	r_robot = 0.46 # [m]
 
         # safety margin
         robot_sf = 1.2
-
-
-	def __init__(self):
-		self.node = rospy.init_node('laser_subsampler', anonymous=True)
+        
+        def __init__(self):
+		self.node = rospy.init_node('laser_ellipse_creater', anonymous=True)
 		self.window_half_width = 30
 		self.obs = []
                 self.dt = 0
+                
+                # Set up obstacles
+                self.defineMovingObstacle()
+                self.defineStaticBoundaries()
+                
+                # Remove... 
+                self.firstCallback = True
 
-		  
+
 	def run(self):
 		self.sub = rospy.Subscriber("/front/scan",sensor_msgs.msg.LaserScan,self.callback)
 		#self.pub = rospy.Publisher("/front/convex_scan",sensor_msgs.msg.LaserScan,queue_size=10)
-		self.pubEll = rospy.Publisher("/obstacle/ellipses",geometry_msgs.msg.Polygon,queue_size=10)
+
+		#self.pubEll = rospy.Publisher("/obstacle/ellipse_sf",geometry_msgs.msg.PolygonStamped,queue_size=10)
+		self.pubWall1 = rospy.Publisher("/obstacle/wall1",geometry_msgs.msg.PolygonStamped,queue_size=10)
+		self.pubWall1_sf = rospy.Publisher("/obstacle/wall1_sf",geometry_msgs.msg.PolygonStamped,queue_size=10)
+		self.pubWall2 = rospy.Publisher("/obstacle/wall2",geometry_msgs.msg.PolygonStamped,queue_size=10)
+		self.pubWall2_sf = rospy.Publisher("/obstacle/wall2_sf",geometry_msgs.msg.PolygonStamped,queue_size=10)
                 
+		self.DS_avoid = rospy.Publisher("/DS/obsAvoidance",geometry_msgs.msg.PolygonStamped,queue_size=10)
 
         def polarToCart(self,r,theta):
 		#return x ,y
 		return r*np.cos(theta),r*np.sin(theta)
-
 		  
 	def cartToPolar(self,x, y):
 		# return r, phi
 		return np.sqrt(x**2+y**2), np.atan2(x,y)
-
 
         def minDiraAng(ang1, ang2):
                 # Check this
@@ -54,38 +73,76 @@ class EllipseLaserFilter:
                 else:
                         return dAng
         
+
         def defineStaticBoundaries(self):
                 # Static ellipses to describe boundaries	 
                 it_obs = 1
                 
-                self.obs[it_obs]['a'] = [10,1]
-                self.obs[it_obs]['p'] = [1,1]
-                self.obs[it_obs]['x0'] = np.array(([5,3]))
-                self.obs[it_obs]['a_sf'] = robot_sf
+                self.obs.append(dict())
+                #self.obs[it_obs]['a'] = [10,1]
+                self.obs[it_obs]['a'] = [30,0.1]
+                self.obs[it_obs]['p'] = [0]
+                self.obs[it_obs]['x0'] = np.array(([-5.8,-5]))
+                self.obs[it_obs]['a_sf'] = self.robot_sf*self.r_robot
                 #self.obs[it_obs]['sf'] = [0*pi/180]
-                self.obs[it_obs]['th_r'] = [0*pi/180]
+                self.obs[it_obs]['th_r'] = [54*pi/180]
 
                 it_obs = 2
-                self.obs[it_obs]['a'] = [10,1]
-                self.obs[it_obs]['p'] =  [1,1]
-                self.obs[it_obs]['x0'] = np.array([5,-3])
-                self.obs[it_obs]['a_sf'] = robot_sf
+                self.obs.append(dict())
+                self.obs[it_obs]['a'] = [30,0.1]
+                self.obs[it_obs]['p'] =  [0]
+                self.obs[it_obs]['x0'] = np.array([-9.8,-5])
+                self.obs[it_obs]['a_sf'] = self.robot_sf*self.r_robot
                 #self.obs[it_obs]['sf'] = [0*pi/180]
-                self.obs[it_obs]['th_r'] = [0*pi/180]
+                self.obs[it_obs]['th_r'] = [57*pi/180]
                 
                 
         def defineMovingObstacle(self):
-               # Human/obstacle moving in space
-                it_obs = 3
+                # Human/obstacle moving in space
+                it_obs = 0
+                self.obs.append(dict())
                 self.obs[it_obs]['a'] = [10,1]
 		self.obs[it_obs]['p'] =  []
-                self.obs[it_obs]['a_sf'] = robot_sf
-
-                self.obs[it_obs]['x0'] =  self.posObs
-                self.obs[it_obs]['th_r'] =  self.orientationObs
-
-
+                self.obs[it_obs]['a_sf'] = self.robot_sf + self.r_robot
                 
+                self.obs[it_obs]['x0'] =  np.array([0,0])
+                self.obs[it_obs]['th_r'] =  0
+                #self.obs[it_obs]['x0'] =  self .posObs
+                #self.obs[it_obs]['th_r'] =  self.orientationObs
+
+        def setStaticEllipses(self,data):
+                N_points = 50 # Resolution of boundary
+
+                # Ellipse 1                
+                ellipse1 = geometry_msgs.msg.PolygonStamped()
+                ellipse1.header = data.header
+                ellipse1.header.frame_id = 'map'
+                
+                obsNumb = 1 # number of first wall
+                wall1 = self.ellipsePolygonCreater(data, N_points , obsNumb)
+                ellipse1.polygon.points = wall1
+                self.pubWall1.publish(ellipse1)
+
+                #ellipse 1 with safety margin
+                sfMargin = True
+                ellipse1.polygon.points = self.ellipsePolygonCreater(data, N_points , obsNumb, True)
+                self.pubWall1_sf.publish(ellipse1)
+                
+                # Ellipse 2
+                ellipse2 = geometry_msgs.msg.PolygonStamped()
+                ellipse2.header = data.header
+                ellipse2.header.frame_id = 'map'
+
+                obsNumb = 2 # number of first wall
+                wall2 = self.ellipsePolygonCreater(data, N_points , obsNumb)
+                ellipse2.polygon.points = wall2
+                self.pubWall2.publish(ellipse2)
+
+                # sfMargin = True
+                ellipse2.polygon.points = self.ellipsePolygonCreater(data, N_points , obsNumb, True)
+                self.pubWall2_sf.publish(ellipse2)
+
+
         def updateMovingObstacle(self):
                 it_obs = 3
 
@@ -107,7 +164,7 @@ class EllipseLaserFilter:
                 integAtt = self.obs[it_obs]['w']*dt+self.obs[it_obs]['th_r']
                 self.obs[it_obs]['th_r'] = ((1-k_update_pos)*self.obs[it_obs]['th_r']
                                        + k_update_pos*integAtt)
-                                       
+
                 
         def identifyMovingObstacle(self):
                 # minimum maximum
@@ -119,21 +176,63 @@ class EllipseLaserFilter:
                 self.orienationObs = 0
                 self.positionObs = np.array(([0,0]))
 		  
-		  
+        def ellipsePolygonCreater(self, data, N_points, it_obs, sfMargin=0):
+                # create first ellipse
+                obsCos = np.cos(self.obs[it_obs]['th_r'])
+                obsSin = np.sin(self.obs[it_obs]['th_r'])
+
+                R = [[obsCos, -obsSin],[obsSin, obsCos]]
+
+                deltaPhi = 2*pi/N_points
+                #a = self.obs[it_obs]['a']
+                a = []
+                if sfMargin:
+                        #print('a',a)
+                        #print('asf', self.obs[it_obs]['a_sf'])
+                        for i in range(self.dim):
+                                a.append(self.obs[it_obs]['a'][i] + self.obs[it_obs]['a_sf'])
+                else:
+                        a = self.obs[it_obs]['a']
+                p = 1
+                ellipseList = []
+
+                # Create new point
+                for ii in range(N_points):
+                     newPoint = geometry_msgs.msg.Point32()  
+                     Phi = ii*deltaPhi-pi
+                     x0 = a[0]*np.cos(Phi)
+                     y0 = a[1]*np.sin(Phi)
+
+                     newPoint.x = self.obs[it_obs]['x0'][0]+ R[0][0]*x0 + R[0][1]*y0
+                     newPoint.y = self.obs[it_obs]['x0'][1]+ R[1][0]*x0 + R[1][1]*y0                   
+                     newPoint.z = 0
+                     
+                     ellipseList.append(newPoint)
+                return ellipseList
+
+
+
+
+
+
+
         def callback(self,data):
-                #Modfiy range to convex obstacles
-                rospy.loginfo("obstacle count %d",12313241234)
+                # Modfiy range to convex obstacles
+                rospy.loginfo("Number of obstacles %d",3)
+                print('New ellipse publish.')
+                
+                # Observe dangerous points
+                if self.firstCallback == True:
+                        self.setStaticEllipses(data)
+                        #self.firstCallback = False
+                        
+                # Publish Dangerous points as Polygon
+                #self.pubEll.publish(PointCloudToEllipses.returnPolygon() )
+                
 
-                print('new point')
-                ellipse1 = geometry_msgs.msg.Polygon()
-                ellipse1.points = geometry_msgs.msg.Point32()
-                ellipse1.points.x = [1,2,2,1]
-                ellipse1.points.y = [1,1,2,2]
-                ellipse1.points.z = [1,1,1,1]
+                
 
-                self.pubEll.publish(ellipse1)
 
-					 
 	def test_callback(self,data):
 		  d_min = 0
 		  d_max = 5
